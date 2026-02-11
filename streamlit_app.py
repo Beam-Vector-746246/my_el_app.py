@@ -84,4 +84,21 @@ def hent_silkeborg_analyse():
             ax1.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
             ax1.set_ylabel("Total kr/kWh (inkl. moms/afgift)")
             
-            # Timetal over søjlerne (
+            # Timetal over søjlerne (for hver hele time)
+            for i in range(0, len(x), 4 if len(x) > 40 else 1): 
+                ax1.text(x[i], y[i] + 0.02, f"{y[i]:.2f}", 
+                         ha='center', fontsize=7, weight='bold')
+
+            st.pyplot(fig)
+            
+            st.info(f"""
+            **Beregning for kl. {behandlet[0]['tid'].strftime('%H:%M')}:**
+            - Spotpris (inkl. moms): {round((behandlet[0]['pris']/MOMS - (tarif + SYSTEM_TARIF + AFGIFT + HANDEL))*MOMS, 2)} kr.
+            - Tariffer & Afgifter (inkl. moms): {round((tarif + SYSTEM_TARIF + AFGIFT + HANDEL)*MOMS, 2)} kr.
+            """)
+            
+    except Exception as e:
+        st.error(f"Fejl: {e}")
+
+if __name__ == "__main__":
+    hent_silkeborg_analyse()
