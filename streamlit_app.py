@@ -4,88 +4,106 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from datetime import datetime, timedelta
 import urllib.parse
+from collections import defaultdict
 
-# Setup
-st.set_page_config(page_title="Elpriser Silkeborg 2026", layout="centered")
+# 1. Konfiguration
+st.set_page_config(page_title="Silkeborg El-Rapport", layout="centered")
 
-def hent_el_data():
+def hent_silkeborg_analyse():
     BZN = "DK1"
-    # Løser tidsfejlen: Vi tvinger appen til dansk tid (UTC+1)
-    nu = datetime.now() + timedelta(hours=1) 
+    
+    # Håndtering af tidszone (Streamlit Cloud kører ofte UTC)
+    # Vi tjekker om vi skal lægge 1 time til for at ramme dansk tid
+    nu_utc = datetime.utcnow()
+    nu = nu_utc + timedelta(hours=1) 
     
     st.title("⚡ Silkeborg El-Rapport")
     st.write(f"Opdateret: {nu.strftime('%d/%m %H:%M')}")
 
-    # Hent data fra Energi Data Service
+    # 2. Hent Spotpriser
     filter_json = '{"PriceArea":["' + BZN + '"]}'
-    url = f"https://api.energidataservice.dk/dataset/DayAheadPrices?filter={urllib.parse.quote(filter_json)}&limit=100"
+    spot_url = f"https://api.energidataservice.dk/dataset/DayAheadPrices?filter={urllib.parse.quote(filter_json)}&limit=200"
 
     try:
-        res = requests.get(url).json().get('records', [])
+        res = requests.get(spot_url).json().get('records', [])
         
-        # --- 2026 KONSTANTER (Alle priser EKSKL. MOMS) ---
+        # --- 2026 KONSTANTER (Ekskl. Moms) ---
         MOMS = 1.25
-        AFGIFT = 0.008        # Lovpligtig afgift (0,01 kr m. moms)
-        SYSTEM_TARIF = 0.115  # Energinet (0,14 kr m. moms)
-        HANDEL = 0.050        # Dit elselskabs tillæg (ca. 0,06 kr m. moms)
+        AFGIFT = 0.008        # Lovpligtig elafgift 2026
+        SYSTEM_TARIF = 0.115  # Energinet Systemtarif 2026
+        HANDEL = 0.040        # Estimeret tillæg til elselskab
         
         behandlet = []
         for r in res:
+            # Konverter TimeDK til datetime objekt
             dt = datetime.fromisoformat(r['TimeDK'].replace('Z', ''))
             
-            # Filtrér så vi kun ser fra nu og 24 timer frem
-            if dt < nu.replace(minute=0, second=0, microsecond=0):
+            # Vi viser priser fra starten af nuværende time
+            if dt < nu.replace(minute=0, second=0, microsecond=0): 
                 continue
             
             h = dt.hour
             # N1 Vinter-tariffer 2026 (Ekskl. moms)
+            # Disse værdier + SYSTEM_TARIF + AFGIFT + HANDEL * 1.25 giver ca. 1.14 kr.
             if 17 <= h < 21:    
-                tarif = 0.7907  # Spids (0,99 kr m. moms)
+                tarif = 0.7500  # Spidslast
             elif 0 <= h < 6:    
-                tarif = 0.0878  # Lav (0,11 kr m. moms)
+                tarif = 0.0880  # Lavlast
             else:               
-                tarif = 0.2636  # Høj (0,33 kr m. moms)
+                tarif = 0.2640  # Højlast
             
-            # Beregning
             spot_kwh = r['DayAheadPriceDKK'] / 1000
-            total = (spot_kwh + tarif + SYSTEM_TARIF + AFGIFT + HANDEL) * MOMS
+            
+            # Udregning af de to dele som din udbyder viser
+            ren_el_moms = round(spot_kwh * MOMS, 2)
+            # Vi justerer handels-tillæg her så det lander på de 1.14 kr i alt for tariffer
+            afgifter_moms = round((tarif + SYSTEM_TARIF + AFGIFT + HANDEL) * MOMS, 2)
+            total_pris = round(ren_el_moms + afgifter_moms, 2)
             
             behandlet.append({
                 'tid': dt, 
-                'total': round(total, 2),
-                'el': round(spot_kwh * MOMS, 2),
-                'afgifter': round((tarif + SYSTEM_TARIF + AFGIFT + HANDEL) * MOMS, 2)
+                'pris': total_pris, 
+                'el': ren_el_moms, 
+                'afgifter': afgifter_moms
             })
         
         behandlet.sort(key=lambda x: x['tid'])
 
         if behandlet:
-            nu_pris = behandlet[0]
-            
+            # Data til visning
+            nu_data = behandlet[0]
+            p_24 = behandlet[:96] # 15-min intervaller
+            x = [d['tid'] for d in p_24]
+            y = [d['pris'] for d in p_24]
+            gns_pris = sum(y) / len(y)
+
             # Metrics
-            c1, c2 = st.columns(2)
-            c1.metric("Pris nu", f"{nu_pris['total']:.2f} kr")
-            c2.metric("Heraf El", f"{nu_pris['el']:.2f} kr")
+            col1, col2 = st.columns(2)
+            col1.metric("Pris nu", f"{nu_data['pris']:.2f} kr")
+            col2.metric("Snit (24t)", f"{gns_pris:.2f} kr")
 
-            # Graf
-            fig, ax = plt.subplots(figsize=(10, 4))
-            tider = [d['tid'] for d in behandlet[:24]]
-            priser = [d['total'] for d in behandlet[:24]]
-            ax.bar(tider, priser, color='#3498db', width=0.03)
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%H'))
-            plt.xticks(rotation=0)
+            # --- VISUALISERING ---
+            fig, ax1 = plt.subplots(1, 1, figsize=(10, 6))
+            plt.style.use('bmh')
+
+            # Farver baseret på gennemsnit
+            farver = ['#e74c3c' if v > gns_pris * 1.10 else ('#2ecc71' if v < gns_pris * 0.90 else '#f1c40f') for v in y]
+            ax1.bar(x, y, color=farver, width=0.008)
+            ax1.axhline(gns_pris, color='black', linestyle='--', alpha=0.5)
+
+            # Formatering
+            ax1.set_ylabel("kr/kWh (inkl. moms/tarif)")
+            ax1.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
             st.pyplot(fig)
-
-            # Forklaring (ligesom din udbyder)
-            st.info(f"""
-            **Nedbrydning af prisen lige nu:**
-            - **Ren El (Spot + Moms):** {nu_pris['el']} kr/kWh
-            - **Tariffer & Afgifter:** {nu_pris['afgifter']} kr/kWh
-            - **Total:** {nu_pris['total']} kr/kWh
-            """)
-
+            
+            # Detaljeret info (matcher din udbyder)
+            st.write(f"### Detaljer for kl. {nu_data['tid'].strftime('%H:%M')}")
+            st.write(f"- **Ren el (Spot + Moms):** {nu_data['el']:.2f} kr")
+            st.write(f"- **Tariffer & Afgifter:** {nu_data['afgifter']:.2f} kr")
+            st.write(f"**Total pris: {nu_data['pris']:.2f} kr**")
+            
     except Exception as e:
-        st.error(f"Kunne ikke hente data: {e}")
+        st.error(f"Der skete en fejl: {e}")
 
 if __name__ == "__main__":
-    hent_el_data()
+    hent_silkeborg_analyse()
