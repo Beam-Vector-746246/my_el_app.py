@@ -4,7 +4,6 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from datetime import datetime, timedelta
 import urllib.parse
-from collections import defaultdict
 
 # 1. Konfiguration
 st.set_page_config(page_title="Silkeborg El-Rapport", layout="centered")
@@ -12,13 +11,15 @@ st.set_page_config(page_title="Silkeborg El-Rapport", layout="centered")
 def hent_silkeborg_analyse():
     BZN = "DK1"
     
-    # Håndtering af tidszone (Streamlit Cloud kører ofte UTC)
-    # Vi tjekker om vi skal lægge 1 time til for at ramme dansk tid
-    nu_utc = datetime.utcnow()
-    nu = nu_utc + timedelta(hours=1) 
+    # --- TIDSHÅNDTERING ---
+    # Vi tvinger tiden til dansk tid (UTC+1)
+    nu = datetime.utcnow() + timedelta(hours=1)
+    
+    # Vi finder det "aktive" kvarter (f.eks. 20:21 bliver til 20:15)
+    aktuelt_kvarter = nu.replace(minute=(nu.minute // 15) * 15, second=0, microsecond=0)
     
     st.title("⚡ Silkeborg El-Rapport")
-    st.write(f"Opdateret: {nu.strftime('%d/%m %H:%M')}")
+    st.write(f"Opdateret: {nu.strftime('%H:%M')} (Interval: {aktuelt_kvarter.strftime('%H:%M')})")
 
     # 2. Hent Spotpriser
     filter_json = '{"PriceArea":["' + BZN + '"]}'
@@ -29,34 +30,31 @@ def hent_silkeborg_analyse():
         
         # --- 2026 KONSTANTER (Ekskl. Moms) ---
         MOMS = 1.25
-        AFGIFT = 0.008        # Lovpligtig elafgift 2026
-        SYSTEM_TARIF = 0.115  # Energinet Systemtarif 2026
-        HANDEL = 0.040        # Estimeret tillæg til elselskab
+        AFGIFT = 0.008        
+        SYSTEM_TARIF = 0.115  
+        HANDEL = 0.040        
         
         behandlet = []
         for r in res:
-            # Konverter TimeDK til datetime objekt
             dt = datetime.fromisoformat(r['TimeDK'].replace('Z', ''))
             
-            # Vi viser priser fra starten af nuværende time
-            if dt < nu.replace(minute=0, second=0, microsecond=0): 
+            # Vi inkluderer priser fra det kvarter vi er i lige nu
+            if dt < aktuelt_kvarter: 
                 continue
             
             h = dt.hour
             # N1 Vinter-tariffer 2026 (Ekskl. moms)
-            # Disse værdier + SYSTEM_TARIF + AFGIFT + HANDEL * 1.25 giver ca. 1.14 kr.
             if 17 <= h < 21:    
-                tarif = 0.7500  # Spidslast
+                tarif = 0.7500  # Spids (Giver 1.14 kr i alt m. afgifter/moms)
             elif 0 <= h < 6:    
-                tarif = 0.0880  # Lavlast
+                tarif = 0.0880  # Lav
             else:               
-                tarif = 0.2640  # Højlast
+                tarif = 0.2640  # Høj
             
             spot_kwh = r['DayAheadPriceDKK'] / 1000
             
-            # Udregning af de to dele som din udbyder viser
+            # Beregnings-dele
             ren_el_moms = round(spot_kwh * MOMS, 2)
-            # Vi justerer handels-tillæg her så det lander på de 1.14 kr i alt for tariffer
             afgifter_moms = round((tarif + SYSTEM_TARIF + AFGIFT + HANDEL) * MOMS, 2)
             total_pris = round(ren_el_moms + afgifter_moms, 2)
             
@@ -70,40 +68,41 @@ def hent_silkeborg_analyse():
         behandlet.sort(key=lambda x: x['tid'])
 
         if behandlet:
-            # Data til visning
+            # Nu peger behandlet[0] altid på det aktive kvarter
             nu_data = behandlet[0]
-            p_24 = behandlet[:96] # 15-min intervaller
-            x = [d['tid'] for d in p_24]
-            y = [d['pris'] for d in p_24]
-            gns_pris = sum(y) / len(y)
-
-            # Metrics
+            
             col1, col2 = st.columns(2)
             col1.metric("Pris nu", f"{nu_data['pris']:.2f} kr")
-            col2.metric("Snit (24t)", f"{gns_pris:.2f} kr")
+            
+            # Snit for de næste 24 timer
+            p_24 = behandlet[:96]
+            gns_pris = sum(d['pris'] for d in p_24) / len(p_24)
+            col2.metric("Snit (næste 24t)", f"{gns_pris:.2f} kr")
 
-            # --- VISUALISERING ---
-            fig, ax1 = plt.subplots(1, 1, figsize=(10, 6))
+            # --- GRAF ---
+            fig, ax1 = plt.subplots(figsize=(10, 5))
             plt.style.use('bmh')
-
-            # Farver baseret på gennemsnit
-            farver = ['#e74c3c' if v > gns_pris * 1.10 else ('#2ecc71' if v < gns_pris * 0.90 else '#f1c40f') for v in y]
-            ax1.bar(x, y, color=farver, width=0.008)
-            ax1.axhline(gns_pris, color='black', linestyle='--', alpha=0.5)
-
-            # Formatering
-            ax1.set_ylabel("kr/kWh (inkl. moms/tarif)")
+            
+            x_vals = [d['tid'] for d in p_24]
+            y_vals = [d['pris'] for d in p_24]
+            
+            # Marker nuværende time med en anden farve
+            farver = ['#2980b9'] * len(y_vals)
+            farver[0] = '#e74c3c' # Den røde bar er "lige nu"
+            
+            ax1.bar(x_vals, y_vals, color=farver, width=0.008)
             ax1.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
             st.pyplot(fig)
             
-            # Detaljeret info (matcher din udbyder)
-            st.write(f"### Detaljer for kl. {nu_data['tid'].strftime('%H:%M')}")
-            st.write(f"- **Ren el (Spot + Moms):** {nu_data['el']:.2f} kr")
-            st.write(f"- **Tariffer & Afgifter:** {nu_data['afgifter']:.2f} kr")
-            st.write(f"**Total pris: {nu_data['pris']:.2f} kr**")
+            # Detalje-boks
+            st.info(f"""
+            **Lige nu ({nu_data['tid'].strftime('%H:%M')} - {(nu_data['tid'] + timedelta(minutes=15)).strftime('%H:%M')}):**
+            - Ren el: {nu_data['el']:.2f} kr
+            - Tariffer/Afgift: {nu_data['afgifter']:.2f} kr
+            """)
             
     except Exception as e:
-        st.error(f"Der skete en fejl: {e}")
+        st.error(f"Fejl: {e}")
 
 if __name__ == "__main__":
     hent_silkeborg_analyse()
